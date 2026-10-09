@@ -104,6 +104,9 @@ struct MockStateInner {
     /// How many times each app has been asked for its focused window or its
     /// window list, so a test can check who a lookup bothers.
     app_reads: HashMap<Pid, usize>,
+    /// How many times the enhanced-UI sweep has released a guard, so a test can
+    /// check it runs once per motion rather than once per frame.
+    enhanced_ui_releases: usize,
 }
 
 #[derive(Clone)]
@@ -127,6 +130,7 @@ impl MockState {
                 background_tabs: HashSet::new(),
                 raised: Vec::new(),
                 app_reads: HashMap::new(),
+                enhanced_ui_releases: 0,
             })),
         }
     }
@@ -454,6 +458,10 @@ impl MockState {
         });
     }
 
+    pub fn enhanced_ui_releases(&self) -> usize {
+        self.inner.force_read().enhanced_ui_releases
+    }
+
     pub fn cursor_position(&self) -> IVec2 {
         self.inner.force_read().cursor_position
     }
@@ -498,6 +506,14 @@ impl MockState {
                 let width = size.x.max(w.min_width).min(max_width);
                 w.frame.max = w.frame.min + size.with_x(width);
             }
+        });
+
+        // The mock never disables enhanced UI, so there is nothing to restore —
+        // but the sweep still calls this, and it counts the calls so a test can
+        // check the guard spans a motion instead of each AX write.
+        let s = self.clone();
+        mw.expect_release_enhanced_ui().returning(move || {
+            s.inner.force_write().enhanced_ui_releases += 1;
         });
 
         let s_move = self.clone();

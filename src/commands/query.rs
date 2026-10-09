@@ -12,6 +12,7 @@ use tracing::warn;
 
 use super::{Command, Operation};
 
+use crate::ecs::params::FrameActivity;
 use crate::ecs::state::{
     PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState, PaneruWindowState,
     QueryStateParams, StateEvent,
@@ -44,6 +45,9 @@ struct StateBroadcastCache {
     virtual_workspaces: Option<Vec<PaneruVirtualWorkspaceState>>,
     on_screen: Option<Vec<PaneruWindowState>>,
     titles: BTreeMap<WinID, String>,
+    /// A geometry change seen while the screen was still animating, held back
+    /// until the motion settles. See `state_event_broadcast_handler`.
+    pending_on_screen: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -185,6 +189,49 @@ impl StateBroadcastIntent {
     fn is_empty(&self) -> bool {
         !self.requires_state() && self.title_changes.is_empty() && self.display_changes.is_empty()
     }
+
+    /// True when a plain geometry change is the only reason state is needed:
+    /// nothing structural, no focus change, no title or display churn. This is
+    /// the one intent that can arrive on every frame of an animation, so it is
+    /// the one worth deferring.
+    fn is_only_on_screen(&self) -> bool {
+        self.on_screen_changed
+            && !self.virtual_workspace_changed
+            && !self.windows_changed
+            && !self.window_focused
+            && !self.active_display_changed
+            && self.title_changes.is_empty()
+            && self.display_changes.is_empty()
+    }
+}
+
+/// Holds a geometry-only intent back while the screen is still moving, and
+/// folds the held one back in on the first settled frame. Returns `true` when
+/// the caller should skip this frame entirely.
+///
+/// Servicing a geometry change means a full `state.extract()`, which goes out to
+/// the window server. Our own AX repositions echo back as `WindowMoved`, so an
+/// animating or scrolling strip would otherwise rebuild and broadcast the whole
+/// document on every frame. One document once the motion settles is
+/// the only one that described a stable layout anyway.
+///
+/// Every other intent stays immediate: focus, create, destroy, title and display
+/// changes are all low frequency, and a subscriber should not have to wait out an
+/// animation to hear about them.
+fn defer_geometry_intent(
+    intent: &mut StateBroadcastIntent,
+    mid_frame: bool,
+    pending_on_screen: &mut bool,
+) -> bool {
+    if mid_frame {
+        if !intent.is_only_on_screen() {
+            return false;
+        }
+        *pending_on_screen = true;
+        return true;
+    }
+    intent.on_screen_changed |= std::mem::take(pending_on_screen);
+    false
 }
 
 pub(super) fn register_query_commands(app: &mut App) {
@@ -376,6 +423,7 @@ fn state_event_broadcast_handler(
     mut cache: ResMut<StateBroadcastCache>,
     focused_changes: Query<Entity, Added<FocusedMarker>>,
     active_workspace_changes: Query<Entity, Added<ActiveWorkspaceMarker>>,
+    activity: FrameActivity,
     state: QueryStateParams,
 ) {
     let events = messages.read().collect::<Vec<_>>();
@@ -398,7 +446,16 @@ fn state_event_broadcast_handler(
         }),
         window_focused: !focused_changes.is_empty(),
     };
-    let intent = StateBroadcastIntent::from_events(events, signals);
+    let mut intent = StateBroadcastIntent::from_events(events, signals);
+
+    if defer_geometry_intent(
+        &mut intent,
+        activity.mid_frame(),
+        &mut cache.pending_on_screen,
+    ) {
+        return;
+    }
+
     if intent.is_empty() {
         return;
     }
@@ -760,5 +817,61 @@ mod tests {
             assert!(stack_intent.windows_changed);
             assert!(stack_intent.on_screen_changed);
         }
+    }
+
+    /// A plain move while the strip is animating is held back, and flushed once
+    /// when it settles, even though no event arrives on that settled frame.
+    #[test]
+    fn geometry_intent_is_deferred_until_motion_settles() {
+        let mut pending = false;
+        let moved = [Event::WindowMoved { window_id: 1 }];
+
+        for _ in 0..5 {
+            let mut intent =
+                StateBroadcastIntent::from_events(&moved, StateBroadcastSignals::default());
+            assert!(defer_geometry_intent(&mut intent, true, &mut pending));
+            assert!(pending, "the held geometry change should be remembered");
+        }
+
+        // The settled frame carries no events of its own.
+        let mut intent = StateBroadcastIntent::from_events(&[], StateBroadcastSignals::default());
+        assert!(!defer_geometry_intent(&mut intent, false, &mut pending));
+        assert!(intent.on_screen_changed, "the hold should flush on settle");
+        assert!(!pending, "and flush only once");
+
+        let mut intent = StateBroadcastIntent::from_events(&[], StateBroadcastSignals::default());
+        assert!(!defer_geometry_intent(&mut intent, false, &mut pending));
+        assert!(!intent.on_screen_changed);
+        assert!(intent.is_empty());
+    }
+
+    /// Anything structural alongside the move is sent straight away: a
+    /// subscriber should not have to wait out an animation for it.
+    #[test]
+    fn structural_intent_is_not_deferred_mid_motion() {
+        let mut pending = false;
+        let events = [
+            Event::WindowMoved { window_id: 1 },
+            Event::WindowMinimized { window_id: 2 },
+        ];
+        let mut intent =
+            StateBroadcastIntent::from_events(&events, StateBroadcastSignals::default());
+
+        assert!(!defer_geometry_intent(&mut intent, true, &mut pending));
+        assert!(!pending);
+        assert!(intent.windows_changed);
+        assert!(intent.on_screen_changed);
+    }
+
+    #[test]
+    fn geometry_intent_passes_through_when_nothing_is_moving() {
+        let mut pending = false;
+        let moved = [Event::WindowMoved { window_id: 1 }];
+        let mut intent =
+            StateBroadcastIntent::from_events(&moved, StateBroadcastSignals::default());
+
+        assert!(!defer_geometry_intent(&mut intent, false, &mut pending));
+        assert!(intent.on_screen_changed);
+        assert!(!pending);
     }
 }
