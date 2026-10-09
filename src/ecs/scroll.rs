@@ -429,20 +429,28 @@ pub(super) fn swiping_timeout(
     let viewport_width = f64::from(active_display.bounds().width());
 
     for (entity, mut scroll) in strips {
-        if time.elapsed().abs_diff(scroll.last_event) > FINGER_LIFT_THRESHOLD {
-            scroll.is_user_swiping = false;
+        if time.elapsed().abs_diff(scroll.last_event) <= FINGER_LIFT_THRESHOLD {
+            continue;
+        }
+        scroll.is_user_swiping = false;
 
-            if scroll.velocity.abs() * dt * viewport_width < MIN_VELOCITY_PX
-                && let Ok(mut entity_commands) = commands.get_entity(entity)
-            {
-                entity_commands.try_remove::<Scrolling>();
-            }
-            if let Some(point) = window_manager.cursor_position() {
-                commands.trigger(SendMessageTrigger(Event::MouseMoved {
-                    point,
-                    modifiers: Modifiers::empty(),
-                }));
-            }
+        if scroll.velocity.abs() * dt * viewport_width >= MIN_VELOCITY_PX {
+            continue;
+        }
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_remove::<Scrolling>();
+        }
+        // The strip has come to rest, so re-run focus-follows-mouse against the
+        // layout the user is now actually looking at. Probing on every frame of
+        // the coast instead costs a `SLSGetCurrentCursorLocation` plus, through
+        // the synthetic event, a throttled `find_window_at_point` round trip
+        // twenty times a second, and resolves focus against window positions
+        // that are still moving.
+        if let Some(point) = window_manager.cursor_position() {
+            commands.trigger(SendMessageTrigger(Event::MouseMoved {
+                point,
+                modifiers: Modifiers::empty(),
+            }));
         }
     }
 }

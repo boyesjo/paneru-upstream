@@ -12,7 +12,7 @@ use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::SystemCondition;
 use bevy::ecs::schedule::common_conditions::{not, resource_changed, resource_exists};
 use bevy::ecs::schedule::{ScheduleLabel as _, SingleThreadedExecutor, SystemSet};
-use bevy::ecs::system::{Commands, EntityCommands, Query, Res, SystemId};
+use bevy::ecs::system::{Commands, EntityCommands, Local, Query, Res, SystemId};
 use bevy::prelude::Event as BevyEvent;
 use bevy::tasks::Task;
 use bevy::time::Timer;
@@ -178,6 +178,17 @@ pub fn register_systems(app: &mut bevy::app::App) {
                     || !workspace_changed.is_empty()
                     || !focused_moved.is_empty()))
     };
+    // Releases the enhanced-UI guards taken during a motion, normally on the
+    // frame the motion ends. The counter is a safety valve: a marker that somehow
+    // never clears must not leave an app pinned with enhanced UI switched off, so
+    // a motion that runs on and on forces a release periodically as well.
+    let enhanced_ui_sweep_due = |mut mid_frames: Local<u32>, activity: params::FrameActivity| {
+        if !activity.mid_frame() {
+            return std::mem::take(&mut *mid_frames) > 0;
+        }
+        *mid_frames += 1;
+        mid_frames.is_multiple_of(600)
+    };
     let native_tabs_enabled =
         |config: Option<Res<Config>>| config.is_none_or(|config| config.native_tabs_enabled());
 
@@ -310,6 +321,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 systems::animate_entities,
                 systems::commit_window_position.run_if(not(resource_exists::<Initializing>)),
                 systems::verify_window_position.run_if(not(resource_exists::<Initializing>)),
+                systems::release_enhanced_ui_holds.run_if(enhanced_ui_sweep_due),
             )
                 .chain(),
             (

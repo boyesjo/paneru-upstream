@@ -1307,6 +1307,19 @@ pub(super) fn commit_window_position(
         });
 }
 
+/// Drops the `AXEnhancedUserInterface` guards that [`Window::reposition`] and
+/// [`Window::resize`] took, restoring the attribute for every app whose windows
+/// just stopped moving. Runs on the frame a motion ends, so the guard spans the
+/// whole slide rather than each individual AX write.
+#[instrument(level = Level::TRACE, skip_all)]
+pub(super) fn release_enhanced_ui_holds(mut windows: Populated<&mut Window>) {
+    for mut window in &mut windows {
+        // Nothing reads `Changed<Window>`, but releasing a guard is not a change
+        // to the component's own data either, so don't dirty the tick for it.
+        window.bypass_change_detection().release_enhanced_ui();
+    }
+}
+
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn verify_window_position(
     mut windows: Populated<(Entity, &mut Window, &Position, &mut VerifyWindowPosition)>,

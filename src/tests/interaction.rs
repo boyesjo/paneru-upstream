@@ -4326,3 +4326,103 @@ fn observer_registration_recovery(all_failed: bool) {
         "successful registration must stop retrying"
     );
 }
+
+/// The finger-lift cursor probe exists to re-run focus-follows-mouse once the
+/// strip stops. Firing it on every frame of the coast instead costs a cursor
+/// round trip and a throttled window hit-test twenty times a second, and
+/// resolves focus against positions that are still moving.
+#[test]
+fn swipe_probes_the_cursor_once_per_coast() {
+    let commands = vec![
+        // The initial layout settles during this noop, so the counters below
+        // only see what the swipe itself causes.
+        Event::MenuOpened { window_id: 0 },
+        Event::Swipe {
+            delta: 0.04,
+            fingers: 3,
+            distance_cm: 0.0,
+        },
+    ];
+
+    let config: Config = (
+        MainOptions {
+            swipe_gesture_fingers: Some(3),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let baseline = std::rc::Rc::new(std::cell::Cell::new(0));
+    let after = baseline.clone();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(6)
+        .on_iteration(0, move |_world, state| baseline.set(state.cursor_probes()))
+        .on_iteration(1, move |_world, state| {
+            assert_eq!(
+                state.cursor_probes() - after.get(),
+                1,
+                "the cursor should be probed once, when the strip comes to rest"
+            );
+        })
+        .run(commands);
+}
+
+/// The sweep that restores `AXEnhancedUserInterface` runs once per motion, on
+/// the frame it ends. The guard it releases is covered by
+/// `enhanced_ui_boxed_guard_survives_the_call_that_took_it`; what this pins down
+/// is the cadence, so the run condition cannot regress to firing every frame.
+#[test]
+fn enhanced_ui_is_released_once_per_motion() {
+    const WINDOWS: usize = 6;
+
+    let commands = vec![
+        Event::Swipe {
+            delta: 0.04,
+            fingers: 3,
+            distance_cm: 0.0,
+        },
+        // A noop, to give the strip a full command window to come to rest in.
+        Event::MenuOpened { window_id: 0 },
+        Event::Swipe {
+            delta: 0.04,
+            fingers: 3,
+            distance_cm: 0.0,
+        },
+        Event::MenuOpened { window_id: 0 },
+    ];
+
+    let config: Config = (
+        MainOptions {
+            swipe_gesture_fingers: Some(3),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let first = std::rc::Rc::new(std::cell::Cell::new(0));
+    let second = first.clone();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(i32::try_from(WINDOWS).unwrap())
+        .on_iteration(1, move |_world, state| {
+            // One sweep over every window per motion. The initial layout and the
+            // swipe may or may not land in the same one, so take this as the
+            // baseline and assert on what the second swipe adds.
+            let releases = state.enhanced_ui_releases();
+            assert_eq!(releases % WINDOWS, 0, "sweeps cover every window at once");
+            first.set(releases);
+        })
+        .on_iteration(3, move |_world, state| {
+            assert_eq!(
+                state.enhanced_ui_releases() - second.get(),
+                WINDOWS,
+                "exactly one more sweep for the second motion, not one per frame"
+            );
+        })
+        .run(commands);
+}

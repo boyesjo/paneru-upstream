@@ -89,6 +89,34 @@ struct EnhancedUiGuard<F: FnOnce() -> Result<()>> {
     pid: Pid,
 }
 
+/// A restore closure with its type erased, so a guard can be parked in a field
+/// and outlive the call that took it. See [`WindowOS::hold_enhanced_ui`].
+type BoxedRestore = Box<dyn FnOnce() -> Result<()> + Send + Sync>;
+
+impl<F: FnOnce() -> Result<()>> std::fmt::Debug for EnhancedUiGuard<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnhancedUiGuard")
+            .field("pid", &self.pid)
+            .field("owes_restore", &self.restore.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<F: FnOnce() -> Result<()> + Send + Sync + 'static> EnhancedUiGuard<F> {
+    /// Moves the acquisition into a storable guard. Taking `restore` leaves the
+    /// original inert, so its `Drop` does not release what the new one now owes.
+    fn boxed(mut self) -> EnhancedUiGuard<BoxedRestore> {
+        EnhancedUiGuard {
+            state: self.state.clone(),
+            restore: self
+                .restore
+                .take()
+                .map(|restore| Box::new(restore) as BoxedRestore),
+            pid: self.pid,
+        }
+    }
+}
+
 impl<F: FnOnce() -> Result<()>> Drop for EnhancedUiGuard<F> {
     fn drop(&mut self) {
         if let Some(restore) = self.restore.take() {
@@ -305,6 +333,10 @@ pub trait WindowApi: Send + Sync {
     fn is_full_screen(&self) -> bool;
     fn reposition(&mut self, origin: Origin);
     fn resize(&mut self, size: Size);
+    /// Restores `AXEnhancedUserInterface` for the app, if a move or resize
+    /// turned it off. Called once nothing is animating any more, so the
+    /// workaround spans a whole motion instead of a single AX write.
+    fn release_enhanced_ui(&mut self);
     fn update_frame(&mut self) -> Result<IRect>;
     fn focus_without_raise(
         &self,
@@ -385,6 +417,9 @@ pub struct WindowOS {
     /// in [`Self::disable_enhanced_ui`] is a relaxed atomic load instead of
     /// acquiring the PID lock from every `par_iter_mut` worker.
     enhanced_ui_absent: AtomicBool,
+    /// Held for the duration of a motion rather than for a single AX write.
+    /// See [`Self::hold_enhanced_ui`].
+    enhanced_ui_hold: Option<EnhancedUiGuard<BoxedRestore>>,
 
     /// The last title read off the element, cached because reading one is a
     /// synchronous cross-process call and many callers want it for every
@@ -451,6 +486,7 @@ impl WindowOS {
             app_reference: OnceLock::new(),
             enhanced_ui_state: OnceLock::new(),
             enhanced_ui_absent: AtomicBool::new(false),
+            enhanced_ui_hold: None,
             title: RwLock::new(None),
             role: OnceLock::new(),
             subrole: OnceLock::new(),
@@ -545,6 +581,22 @@ impl WindowOS {
 
     /// Suppresses app-driven move/resize animations until the last guard drops.
     /// The PID lock covers flag/counter transitions, not the window operations.
+    /// Takes the enhanced-UI guard unless this window already holds one, and
+    /// keeps it until [`Self::release_enhanced_ui`] drops it.
+    ///
+    /// Acquiring per AX write costs three extra cross-process round trips per
+    /// app per frame for the apps that really do expose
+    /// `AXEnhancedUserInterface` (read, write false, write true again on drop),
+    /// each bounded only by the AX messaging timeout. Holding it for the whole
+    /// motion pays that once, and leaves the app's own animation suppression in
+    /// effect throughout instead of toggling it at frame rate.
+    fn hold_enhanced_ui(&mut self) {
+        if self.enhanced_ui_hold.is_some() {
+            return;
+        }
+        self.enhanced_ui_hold = self.disable_enhanced_ui().map(EnhancedUiGuard::boxed);
+    }
+
     fn disable_enhanced_ui(&self) -> Option<EnhancedUiGuard<impl FnOnce() -> Result<()> + use<>>> {
         if self.enhanced_ui_absent.load(Ordering::Relaxed) {
             return None;
@@ -786,8 +838,12 @@ impl WindowApi for WindowOS {
             trace!("already in position.");
             return;
         }
-        let _enhanced_ui = self.disable_enhanced_ui();
+        self.hold_enhanced_ui();
         self.set_ax_position(origin);
+    }
+
+    fn release_enhanced_ui(&mut self) {
+        drop(self.enhanced_ui_hold.take());
     }
 
     #[instrument(level = Level::TRACE)]
@@ -798,7 +854,7 @@ impl WindowApi for WindowOS {
         }
         let previous_frame = self.frame;
         let target_origin = previous_frame.min;
-        let _enhanced_ui = self.disable_enhanced_ui();
+        self.hold_enhanced_ui();
         self.set_ax_size(size);
 
         let mut previous_observed_frame = previous_frame;
@@ -1238,6 +1294,63 @@ mod tests {
         let state = state.lock().unwrap();
         assert_eq!(state.active_operations, 0);
         assert!(!state.absent);
+        assert!(!state.restore_pending);
+    }
+
+    /// A guard parked in a field spans as many AX writes as the motion needs,
+    /// for one read and one disable/restore pair, instead of three extra
+    /// cross-process round trips per app on every frame.
+    #[test]
+    fn enhanced_ui_boxed_guard_survives_the_call_that_took_it() {
+        let state = Arc::new(Mutex::new(EnhancedUiState::default()));
+        let enabled = Arc::new(AtomicBool::new(true));
+        let reads = AtomicUsize::new(0);
+        let restorations = Arc::new(AtomicUsize::new(0));
+
+        let take_one = |enabled: Arc<AtomicBool>, restorations: Arc<AtomicUsize>| {
+            let disabled = enabled.clone();
+            let restored = enabled.clone();
+            acquire_enhanced_ui(
+                state.clone(),
+                1,
+                || {
+                    reads.fetch_add(1, Ordering::Relaxed);
+                    Ok(enabled.load(Ordering::Relaxed))
+                },
+                move || {
+                    disabled.store(false, Ordering::Relaxed);
+                    Ok(())
+                },
+                move || {
+                    restorations.fetch_add(1, Ordering::Relaxed);
+                    restored.store(true, Ordering::Relaxed);
+                    Ok(())
+                },
+            )
+            .unwrap()
+            .map(EnhancedUiGuard::boxed)
+        };
+
+        // What `hold_enhanced_ui` does: take one guard, keep it, write repeatedly.
+        let mut hold = take_one(enabled.clone(), restorations.clone());
+        assert!(hold.is_some());
+        for _ in 0..10 {
+            assert!(!enabled.load(Ordering::Relaxed), "stays off for the motion");
+            assert_eq!(restorations.load(Ordering::Relaxed), 0);
+        }
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            1,
+            "the attribute is read once, not once per AX write"
+        );
+
+        // What the settle sweep does.
+        drop(hold.take());
+        assert!(enabled.load(Ordering::Relaxed));
+        assert_eq!(restorations.load(Ordering::Relaxed), 1);
+
+        let state = state.lock().unwrap();
+        assert_eq!(state.active_operations, 0);
         assert!(!state.restore_pending);
     }
 
