@@ -732,6 +732,112 @@ fn test_closing_window_of_live_app_closes_the_gap() {
         .run(commands);
 }
 
+/// Closing the focused window focuses its left neighbour, wherever the strip
+/// is scrolled; at the left edge, its right one.
+#[test]
+fn test_closing_focused_window_focuses_its_left_neighbour() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::West)),
+        }, // 2
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        }, // 4
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::First)),
+        }, // 5
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        }, // 7
+    ];
+
+    TestHarness::new()
+        .with_windows(5)
+        .on_iteration(2, |world, state| {
+            assert_focused!(world, 3);
+            state.os_close_window(3);
+        })
+        .on_iteration(4, |world, _state| {
+            assert!(!window_exists(world, 3), "closed window must be dropped");
+            assert_focused!(world, 2);
+        })
+        .on_iteration(5, |world, state| {
+            assert_focused!(world, 0);
+            state.os_close_window(0);
+        })
+        .on_iteration(7, |world, _state| {
+            assert!(!window_exists(world, 0), "closed window must be dropped");
+            assert_focused!(world, 1);
+        })
+        .run(commands);
+}
+
+/// Closing the focused window of a stack focuses the one above it, and the
+/// stack's top one the one below, so focus stays in the column.
+#[test]
+fn test_closing_focused_window_in_a_stack_stays_in_the_stack() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        }, // 4: 0, 1 and 2 stacked, 2 focused
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        }, // 6
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::North)),
+        }, // 7
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        }, // 9
+    ];
+
+    TestHarness::new()
+        .with_windows(4)
+        .on_iteration(4, |world, state| {
+            assert_focused!(world, 2);
+            state.os_close_window(2);
+        })
+        .on_iteration(6, |world, _state| {
+            assert!(!window_exists(world, 2), "closed window must be dropped");
+            assert_focused!(world, 1);
+        })
+        .on_iteration(7, |world, state| {
+            assert_focused!(world, 0);
+            state.os_close_window(0);
+        })
+        .on_iteration(9, |world, _state| {
+            assert!(!window_exists(world, 0), "closed window must be dropped");
+            assert_focused!(world, 1);
+        })
+        .run(commands);
+}
+
 /// A space notification for a window whose AX element is gone is a real close,
 /// not a space change. It must be recognised on its own, without waiting for
 /// the periodic unordered-window sweep, even though `role()` is cached.

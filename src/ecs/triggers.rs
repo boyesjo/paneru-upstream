@@ -1051,18 +1051,29 @@ fn give_away_focus(
         // Remaining tab gets the focus.
         return;
     }
+    // The focused window going hands focus to its neighbour, the left one
+    // first, so where focus lands never depends on where the strip happens
+    // to be scrolled. One going behind it leaves focus nearest the middle,
+    // where it most likely already is.
+    let focused = windows
+        .focused()
+        .is_some_and(|(_, focused)| focused == entity);
+    let heir = focused.then(|| active_strip.heir(entity)).flatten();
     let display_center = viewport.center().x;
-    let closest = active_strip
-        .all_columns()
-        .into_iter()
-        .filter(|&candidate| candidate != entity)
-        .filter_map(|candidate| {
-            let center = windows.moving_frame(candidate)?.center().x;
-            let distance = (center - display_center).abs();
-            Some((candidate, distance))
+    let closest = heir
+        .or_else(|| {
+            active_strip
+                .all_columns()
+                .into_iter()
+                .filter(|&candidate| candidate != entity)
+                .filter_map(|candidate| {
+                    let center = windows.moving_frame(candidate)?.center().x;
+                    let distance = (center - display_center).abs();
+                    Some((candidate, distance))
+                })
+                .min_by_key(|(_, dist)| *dist)
+                .map(|(e, _)| e)
         })
-        .min_by_key(|(_, dist)| *dist)
-        .map(|(e, _)| e)
         .or_else(|| {
             // Fallback when no candidate has a usable frame: pick any other
             // column in the strip. Without this, losing focus on the only
