@@ -161,9 +161,13 @@ mod paging_tests {
 /// finger-lift timeout below depends on that. It is the wrong bound for
 /// integration: a frame delayed by a blocking AX round trip would otherwise
 /// advance the strip by `velocity * dt * viewport_width` in one step and slam
-/// it into the far clamp bound. Integrate at most one 30fps frame per update,
-/// however long the frame actually took.
-const MAX_STEP_SECS: f64 = 1.0 / 30.0;
+/// it into the far clamp bound.
+///
+/// Loose on purpose, for the same reason as `MAX_ANIMATION_STEP_SECS`: a bound
+/// near the frame period turns every overrunning frame into an under-advance,
+/// and the glide visibly decelerates instead of catching up. This only needs to
+/// catch a stall, not a slow frame.
+const MAX_STEP_SECS: f64 = 1.0 / 8.0;
 
 /// Lower bound on the timestep used to *derive* a velocity from a gesture delta.
 ///
@@ -171,7 +175,18 @@ const MAX_STEP_SECS: f64 = 1.0 / 30.0;
 /// does represent that much finger travel over that much time. The hazard is
 /// the opposite one: on a catch-up frame `dt` approaches zero, and
 /// `gesture_delta / dt` diverges.
-const MIN_STEP_SECS: f64 = 1.0 / 1000.0;
+///
+/// Floored at one refresh interval of the fastest panel we pace to (240Hz)
+/// rather than at a millisecond. No display delivers a real frame faster than
+/// that, so a shorter `dt` is a catch-up artefact, and at 1ms it inflated the
+/// velocity estimate by up to an order of magnitude — a spike the EMA below
+/// then carried into the launch velocity.
+const MIN_STEP_SECS: f64 = 1.0 / 240.0;
+
+/// Time constant of the exponential moving average that smooths the gesture
+/// velocity estimate. Short enough to stay responsive to a flick, long enough
+/// to absorb the per-frame jitter in the raw deltas.
+const VELOCITY_SMOOTHING_TAU_SECS: f64 = 0.030;
 
 /// The on-screen strip, its origin, and the scroll state being applied to it.
 type ScrollingStrip<'w, 's> = Single<
@@ -392,8 +407,12 @@ fn swipe_gesture(
             // Native modifier-scroll events already include macOS momentum.
             // Add synthetic inertia only for raw multi-finger gestures.
             scrolling.velocity = if has_gesture_event {
-                // Smoothen gesture velocity changes using EMA.
-                0.3 * new_velocity + 0.7 * scrolling.velocity
+                // Smoothen gesture velocity changes using EMA. Framed as a
+                // time constant rather than fixed weights so the smoothing
+                // behaves the same at 60 and 120Hz; fixed weights made it a
+                // function of the frame rate.
+                let alpha = 1.0 - (-dt / VELOCITY_SMOOTHING_TAU_SECS).exp();
+                alpha * new_velocity + (1.0 - alpha) * scrolling.velocity
             } else {
                 0.0
             };

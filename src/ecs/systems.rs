@@ -122,7 +122,13 @@ type ResizableWindows<'w, 's> = Query<
     Without<LayoutStrip>,
 >;
 
-const ANIAMTE_SNAP_THRESHOLD: f32 = 5.0;
+/// Distance at which an animation stops lerping and commits the target.
+///
+/// Kept at one logical pixel: on a Retina panel the threshold is doubled in
+/// device pixels, so a larger value ends every slide with a visible jump. With
+/// frames paced to the display there are plenty of them for a 1px threshold to
+/// terminate promptly.
+const ANIMATE_SNAP_THRESHOLD: f32 = 1.0;
 const LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS: u32 = 16;
 const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 2000;
 // Real events (input, IPC, workspace changes, ...) wake the pump immediately
@@ -707,23 +713,22 @@ pub(super) fn retry_front_switch(
     }
 }
 
-/// Upper bound on the timestep fed into [`ease_out_factor`].
+/// Upper bound on the timestep fed into [`ease_out_factor`] while an animation
+/// runs (its first frame is [`FIRST_ANIMATION_STEP_SECS`]).
 ///
-/// When the event loop wakes from an idle sleep (up to 500ms, or 2s in low
-/// power mode), `Time::delta_secs_f64()` reports the entire sleep duration on
-/// the wakeup frame. Feeding that straight into the exponential decay would
-/// consume almost the entire distance on Frame 0 and turn the animation into a
-/// single-frame jump. Cap each frame's step to a 30fps tick (matching the
-/// scroll integrator's `MAX_STEP_SECS`).
-const MAX_ANIMATION_STEP_SECS: f64 = 1.0 / 30.0;
+/// Loose on purpose, matching the scroll integrator's `MAX_STEP_SECS`. A cap
+/// near the frame period makes every frame that overruns it under-advance, so
+/// a brief hitch reads as the whole animation decelerating rather than
+/// catching up. Only a stall, not a slow frame, should be clamped at all.
+const MAX_ANIMATION_STEP_SECS: f64 = 1.0 / 8.0;
 
 /// Upper bound on the timestep of the first frame after an animator was idle.
 ///
 /// That frame's delta is the idle time before it, which has nothing to do with
-/// the motion. Even capped at [`MAX_ANIMATION_STEP_SECS`] it is four frames at
-/// 120Hz, so slides lurched over a third of their distance before the first
-/// refresh. One frame at 120Hz instead: on a slower display the first step is
-/// a little short, which an ease-out never shows.
+/// the motion. Capped at [`MAX_ANIMATION_STEP_SECS`] it is many frames at
+/// once, and a slide lurched most of its distance before the first refresh.
+/// One frame at 120Hz instead: on a slower display the first step is a little
+/// short, which an ease-out never shows.
 const FIRST_ANIMATION_STEP_SECS: f64 = 1.0 / 120.0;
 
 /// The timestep an animator moves by this frame: the frame's delta, or at most
@@ -786,14 +791,14 @@ pub(super) fn animate_entities(
             let current = position.0.as_vec2();
             let lerped = current.lerp(target, t);
 
-            // Snap once we're within a pixel of the target (or after one effectively-
-            // complete tick), so the marker is dropped promptly.
-            let finished = (target - lerped).length() <= ANIAMTE_SNAP_THRESHOLD;
-            let new_pos = if finished {
-                *origin
-            } else {
-                lerped.round().as_ivec2()
-            };
+            // Snap once we're within the threshold of the target, so the marker is
+            // dropped promptly. Positions are integers, so a step that rounds back
+            // onto the current pixel would never make progress: treat that as
+            // arrival too, or the marker stalls for the rest of the session.
+            let stepped = lerped.round().as_ivec2();
+            let finished =
+                (target - lerped).length() <= ANIMATE_SNAP_THRESHOLD || stepped == position.0;
+            let new_pos = if finished { *origin } else { stepped };
 
             trace!(
                 "entity {entity} source {} dest {origin} t {t:.3} moving to {new_pos}",
@@ -837,12 +842,12 @@ pub(super) fn animate_resize_entities(
             let current = bounds.0.as_vec2();
             let lerped = current.lerp(target, t);
 
-            let finished = (target - lerped).length() <= ANIAMTE_SNAP_THRESHOLD;
-            let new_size = if finished {
-                *size
-            } else {
-                lerped.round().as_ivec2()
-            };
+            // See `animate_entities`: a step that rounds onto the current size is
+            // arrival, not progress.
+            let stepped = lerped.round().as_ivec2();
+            let finished =
+                (target - lerped).length() <= ANIMATE_SNAP_THRESHOLD || stepped == bounds.0;
+            let new_size = if finished { *size } else { stepped };
 
             trace!(
                 "entity {entity} source {} dest {size} t {t:.3} resizing to {new_size}",

@@ -2539,6 +2539,82 @@ fn test_snap_strip_marker_forces_snap_for_under_threshold_move() {
     );
 }
 
+/// A displacement small enough that one eased step rounds back onto the
+/// current pixel must still arrive. Positions are integers, so the lerp makes
+/// no progress at that distance; before the arrival check accounted for it, a
+/// gap of about two pixels pinned a `RepositionMarker` for the rest of the
+/// session, which kept the frame active and suppressed mouse focus forever.
+#[test]
+fn test_two_pixel_displacement_does_not_pin_the_reposition_marker() {
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(12.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new().with_config(config).with_windows(3);
+
+    let settle = |h: &mut TestHarness, frames: usize| {
+        for _ in 0..frames {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+    };
+
+    h.app.world_mut().write_message::<Event>(Event::Command {
+        command: Command::PrintState,
+    });
+    settle(&mut h, 40);
+
+    let window = find_window_entity(1, h.app.world_mut());
+    let resting = h
+        .app
+        .world_mut()
+        .get::<Position>(window)
+        .expect("window has a Position")
+        .0;
+
+    // Two pixels: `t` at speed 12 over a 20ms frame is about 0.21, so a single
+    // step covers 0.43px and rounds straight back to where it started.
+    h.app
+        .world_mut()
+        .get_mut::<Position>(window)
+        .expect("window has a Position")
+        .0
+        .x -= 2;
+    let strip_entity = {
+        let world = h.app.world_mut();
+        let mut q = world.query_filtered::<Entity, With<ActiveWorkspaceMarker>>();
+        q.single(world).expect("exactly one active strip")
+    };
+    h.app
+        .world_mut()
+        .get_mut::<Position>(strip_entity)
+        .expect("strip has a Position")
+        .set_changed();
+
+    settle(&mut h, 40);
+
+    assert!(
+        h.app.world_mut().get::<RepositionMarker>(window).is_none(),
+        "a two-pixel move must arrive, not stall with the marker still attached"
+    );
+    assert_eq!(
+        h.app
+            .world_mut()
+            .get::<Position>(window)
+            .expect("window has a Position")
+            .0,
+        resting,
+        "the window must end up back at its laid-out position"
+    );
+}
+
 /// Companion regression: the same under-threshold perturbation, without a
 /// `SnapStripMarker`, must still animate exactly as before — the guard from
 /// the test above is name-scoped to the strip, not a blanket behavior
