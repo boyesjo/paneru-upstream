@@ -714,8 +714,30 @@ pub(super) fn retry_front_switch(
 /// the wakeup frame. Feeding that straight into the exponential decay would
 /// consume almost the entire distance on Frame 0 and turn the animation into a
 /// single-frame jump. Cap each frame's step to a 30fps tick (matching the
-/// scroll integrator's `MAX_STEP_SECS`) so the wakeup frame steps smoothly.
+/// scroll integrator's `MAX_STEP_SECS`).
 const MAX_ANIMATION_STEP_SECS: f64 = 1.0 / 30.0;
+
+/// Upper bound on the timestep of the first frame after an animator was idle.
+///
+/// That frame's delta is the idle time before it, which has nothing to do with
+/// the motion. Even capped at [`MAX_ANIMATION_STEP_SECS`] it is four frames at
+/// 120Hz, so slides lurched over a third of their distance before the first
+/// refresh. One frame at 120Hz instead: on a slower display the first step is
+/// a little short, which an ease-out never shows.
+const FIRST_ANIMATION_STEP_SECS: f64 = 1.0 / 120.0;
+
+/// The timestep an animator moves by this frame: the frame's delta, or at most
+/// [`FIRST_ANIMATION_STEP_SECS`] when the animator didn't run the frame before.
+/// `last_run` is the animator's own record of when it last ran.
+fn animation_delta(time: &Time, last_run: &mut Option<Duration>) -> f64 {
+    let continuing = *last_run == time.elapsed().checked_sub(time.delta());
+    *last_run = Some(time.elapsed());
+    if continuing {
+        time.delta_secs_f64()
+    } else {
+        time.delta_secs_f64().min(FIRST_ANIMATION_STEP_SECS)
+    }
+}
 
 /// Animates window movement.
 /// Fraction of the remaining distance an exponential ease-out consumes in a
@@ -746,12 +768,16 @@ fn ease_out_factor(rate: f64, delta: f64) -> f32 {
 pub(super) fn animate_entities(
     animate: Populated<(&mut Position, Entity, &RepositionMarker)>,
     time: Res<Time>,
+    mut last_run: Local<Option<Duration>>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
     // Frame-rate-independent exponential smoothing (ease-out).
     // `animation_speed` is the decay rate (per second); higher = snappier.
-    let t = ease_out_factor(config.animation_speed(), time.delta_secs_f64());
+    let t = ease_out_factor(
+        config.animation_speed(),
+        animation_delta(&time, &mut last_run),
+    );
 
     animate
         .into_iter()
@@ -794,11 +820,15 @@ pub(super) fn animate_entities(
 pub(super) fn animate_resize_entities(
     animate: Populated<(&mut Bounds, Entity, &ResizeMarker)>,
     time: Res<Time>,
+    mut last_run: Local<Option<Duration>>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
     // Matches animate_entities: exponential ease-out, frame-rate independent.
-    let t = ease_out_factor(config.animation_speed(), time.delta_secs_f64());
+    let t = ease_out_factor(
+        config.animation_speed(),
+        animation_delta(&time, &mut last_run),
+    );
 
     animate
         .into_iter()

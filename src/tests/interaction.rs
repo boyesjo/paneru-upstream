@@ -2384,6 +2384,58 @@ fn test_ensure_visible_without_snap_still_animates() {
     );
 }
 
+/// An animation's first frame steps one frame, not the idle time before it.
+/// The loop sleeps while nothing moves, so the frame that starts a slide
+/// reports the whole sleep as its delta; stepping by that jumped the window a
+/// third of the way before the first refresh.
+#[test]
+fn test_first_animation_step_ignores_the_idle_time_before_it() {
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(15.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new().with_config(config).with_windows(3);
+    h.advance(Duration::from_secs(1));
+
+    let window = find_window_entity(1, h.app.world_mut());
+    let resting = h
+        .app
+        .world_mut()
+        .get::<Position>(window)
+        .expect("window has a Position")
+        .0;
+
+    // Half a second idle, then a slide of 2000 points starts.
+    h.app
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_millis(500),
+        ));
+    h.app
+        .world_mut()
+        .entity_mut(window)
+        .insert(RepositionMarker(resting + Origin::new(2000, 0)));
+    h.app.update();
+
+    let moved = h
+        .app
+        .world_mut()
+        .get::<Position>(window)
+        .expect("window has a Position")
+        .0
+        .x
+        - resting.x;
+    // One 120Hz frame at speed 15 is 1 - e^(-15/120) of the way, 235 points.
+    assert!(
+        (1..=240).contains(&moved),
+        "the first frame must step one frame of the slide, not {moved} of 2000 points"
+    );
+}
+
 /// Regression: `position_layout_windows`'s offscreen/parking magnitude
 /// heuristic has no way to know a virtual-workspace restore is in progress.
 /// A member window whose last position differs from its recomputed target
