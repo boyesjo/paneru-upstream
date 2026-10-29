@@ -717,6 +717,43 @@ pub(super) fn retry_front_switch(
 /// scroll integrator's `MAX_STEP_SECS`) so the wakeup frame steps smoothly.
 const MAX_ANIMATION_STEP_SECS: f64 = 1.0 / 30.0;
 
+/// Upper bound on the timestep of an animator's first two frames after it was
+/// idle.
+///
+/// Neither frame's delta measures the motion. The loop reads its clock before
+/// it waits, so the frame that starts a slide reports the frame before it, and
+/// the next one the whole idle wait plus the first write, the slowest of the
+/// motion. Capped only at [`MAX_ANIMATION_STEP_SECS`], the two covered 39% and
+/// then 24% of a slide at `animation_speed = 15`. A 60Hz frame each instead:
+/// about as long as the frames after them take while the first writes land.
+const FIRST_ANIMATION_STEP_SECS: f64 = 1.0 / 60.0;
+
+/// An animator's record of its own runs, for [`animation_delta`].
+#[derive(Default)]
+pub(super) struct AnimatorRun {
+    /// `Time::elapsed` when the animator last ran.
+    last: Option<Duration>,
+    /// How many frames in a row it has run, after the first.
+    frames: u32,
+}
+
+/// The timestep an animator moves by this frame: the frame's delta, or at most
+/// [`FIRST_ANIMATION_STEP_SECS`] in the first two frames after it was idle.
+fn animation_delta(time: &Time, run: &mut AnimatorRun) -> f64 {
+    let continuing = run.last == time.elapsed().checked_sub(time.delta());
+    run.frames = if continuing {
+        run.frames.saturating_add(1)
+    } else {
+        0
+    };
+    run.last = Some(time.elapsed());
+    if run.frames < 2 {
+        time.delta_secs_f64().min(FIRST_ANIMATION_STEP_SECS)
+    } else {
+        time.delta_secs_f64()
+    }
+}
+
 /// Animates window movement.
 /// Fraction of the remaining distance an exponential ease-out consumes in a
 /// frame, given a decay `rate` (per second) and the frame's `delta` in seconds.
@@ -761,12 +798,13 @@ fn at_least_a_pixel(current: IVec2, stepped: IVec2, target: IVec2) -> IVec2 {
 pub(super) fn animate_entities(
     animate: Populated<(&mut Position, Entity, &RepositionMarker)>,
     time: Res<Time>,
+    mut run: Local<AnimatorRun>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
     // Frame-rate-independent exponential smoothing (ease-out).
     // `animation_speed` is the decay rate (per second); higher = snappier.
-    let t = ease_out_factor(config.animation_speed(), time.delta_secs_f64());
+    let t = ease_out_factor(config.animation_speed(), animation_delta(&time, &mut run));
 
     animate
         .into_iter()
@@ -809,11 +847,12 @@ pub(super) fn animate_entities(
 pub(super) fn animate_resize_entities(
     animate: Populated<(&mut Bounds, Entity, &ResizeMarker)>,
     time: Res<Time>,
+    mut run: Local<AnimatorRun>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
     // Matches animate_entities: exponential ease-out, frame-rate independent.
-    let t = ease_out_factor(config.animation_speed(), time.delta_secs_f64());
+    let t = ease_out_factor(config.animation_speed(), animation_delta(&time, &mut run));
 
     animate
         .into_iter()

@@ -2791,6 +2791,61 @@ fn test_ensure_visible_without_snap_still_animates() {
     );
 }
 
+/// An animation's first two frames each step one frame, whatever the time
+/// before them. The loop reads its clock before it waits, so the frame that
+/// starts a slide reports the frame before it, and the next one the idle wait
+/// and the first write; stepping by those took 39% and then 24% of a slide.
+#[test]
+fn test_first_animation_steps_ignore_the_time_before_them() {
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(15.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new().with_config(config).with_windows(3);
+    h.advance(Duration::from_secs(1));
+
+    let window = find_window_entity(1, h.app.world_mut());
+    let position = |app: &mut App| {
+        app.world_mut()
+            .get::<Position>(window)
+            .expect("window has a Position")
+            .0
+    };
+    let resting = position(&mut h.app);
+    h.app
+        .world_mut()
+        .entity_mut(window)
+        .insert(RepositionMarker(resting + Origin::new(2000, 0)));
+
+    // Half a second before each of the first two frames, then 120Hz frames.
+    let mut steps = vec![];
+    for frame in [500_000, 500_000, 8_333] {
+        let before = position(&mut h.app).x;
+        h.app
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                Duration::from_micros(frame),
+            ));
+        h.app.update();
+        steps.push(position(&mut h.app).x - before);
+    }
+
+    // A 60Hz frame at speed 15 is 1 - e^(-15/60) of the way: 442 of the 2000
+    // points, then 345 of the 1558 left, then a 120Hz frame's 143.
+    assert!(
+        (1..=450).contains(&steps[0]) && (1..=steps[0]).contains(&steps[1]),
+        "the first two frames must each step a 60Hz frame of the slide, not {steps:?}"
+    );
+    assert!(
+        steps[2] > 0 && steps[2] < steps[1],
+        "the slide must go on easing out after them, not {steps:?}"
+    );
+}
+
 /// A slow animation still arrives on frames as regular as the display's.
 /// Positions and sizes are whole pixels, so an eased step under half a pixel
 /// rounds to nothing: at `animation_speed = 10` on a 120Hz display, a slide
