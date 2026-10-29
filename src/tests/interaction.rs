@@ -2791,6 +2791,66 @@ fn test_ensure_visible_without_snap_still_animates() {
     );
 }
 
+/// A slow animation still arrives on frames as regular as the display's.
+/// Positions and sizes are whole pixels, so an eased step under half a pixel
+/// rounds to nothing: at `animation_speed = 10` on a 120Hz display, a slide
+/// stopped 6 pixels short of its target and kept its marker.
+#[test]
+fn test_slow_animation_arrives_on_regular_frames() {
+    use crate::ecs::{Bounds, ResizeMarker};
+
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(10.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new().with_config(config).with_windows(3);
+    h.advance(Duration::from_secs(1));
+
+    let window = find_window_entity(1, h.app.world_mut());
+    let world = h.app.world_mut();
+    let origin = world
+        .get::<Position>(window)
+        .expect("window has a Position")
+        .0
+        + Origin::new(2000, 0);
+    let size = world.get::<Bounds>(window).expect("window has Bounds").0 + Size::new(300, 0);
+    world
+        .entity_mut(window)
+        .insert((RepositionMarker(origin), ResizeMarker(size)));
+
+    // Two and a half seconds of 120Hz frames, 1 - e^(-25) of the way.
+    h.app
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_micros(8_333),
+        ));
+    for _ in 0..300 {
+        h.app.update();
+    }
+
+    let world = h.app.world_mut();
+    assert_eq!(
+        world
+            .get::<Position>(window)
+            .expect("window has a Position")
+            .0,
+        origin
+    );
+    assert_eq!(
+        world.get::<Bounds>(window).expect("window has Bounds").0,
+        size
+    );
+    assert!(
+        world.get::<RepositionMarker>(window).is_none()
+            && world.get::<ResizeMarker>(window).is_none(),
+        "a finished animation must drop its markers"
+    );
+}
+
 /// Regression: `position_layout_windows`'s offscreen/parking magnitude
 /// heuristic has no way to know a virtual-workspace restore is in progress.
 /// A member window whose last position differs from its recomputed target

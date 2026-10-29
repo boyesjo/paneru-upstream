@@ -7,7 +7,7 @@ use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::system::{
     Commands, Local, NonSend, NonSendMut, Populated, Query, Res, ResMut, Single,
 };
-use bevy::math::IRect;
+use bevy::math::{IRect, IVec2};
 use bevy::tasks::AsyncComputeTaskPool;
 use bevy::tasks::futures_lite::future;
 use bevy::time::Time;
@@ -730,6 +730,21 @@ fn ease_out_factor(rate: f64, delta: f64) -> f32 {
     (1.0 - (-rate * delta).exp()).clamp(0.0, 1.0) as f32
 }
 
+/// `stepped`, except on an axis where it rounded back onto `current`: there,
+/// one pixel on toward `target`.
+///
+/// Positions and sizes are whole pixels, so an eased step under half a pixel
+/// rounds to nothing. Within [`ANIAMTE_SNAP_THRESHOLD`] of the target that is
+/// arrival, but a slow `animation_speed` gets there first: at 10, on regular
+/// 120Hz frames, every slide stopped 6 pixels short and kept its marker.
+fn at_least_a_pixel(current: IVec2, stepped: IVec2, target: IVec2) -> IVec2 {
+    IVec2::select(
+        stepped.cmpne(current),
+        stepped,
+        current + (target - current).signum(),
+    )
+}
+
 /// This is a Bevy system that runs on `Update`. It smoothly moves windows to their target
 /// positions, as indicated by the `RepositionMarker` component.
 /// Animation speed is controlled by the `animation_speed` in the `Config`.
@@ -766,7 +781,7 @@ pub(super) fn animate_entities(
             let new_pos = if finished {
                 *origin
             } else {
-                lerped.round().as_ivec2()
+                at_least_a_pixel(position.0, lerped.round().as_ivec2(), *origin)
             };
 
             trace!(
@@ -811,7 +826,7 @@ pub(super) fn animate_resize_entities(
             let new_size = if finished {
                 *size
             } else {
-                lerped.round().as_ivec2()
+                at_least_a_pixel(bounds.0, lerped.round().as_ivec2(), *size)
             };
 
             trace!(
