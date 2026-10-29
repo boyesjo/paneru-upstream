@@ -122,7 +122,6 @@ type ResizableWindows<'w, 's> = Query<
     Without<LayoutStrip>,
 >;
 
-const ANIAMTE_SNAP_THRESHOLD: f32 = 5.0;
 const LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS: u32 = 16;
 const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 2000;
 // Real events (input, IPC, workspace changes, ...) wake the pump immediately
@@ -771,9 +770,8 @@ fn ease_out_factor(rate: f64, delta: f64) -> f32 {
 /// one pixel on toward `target`.
 ///
 /// Positions and sizes are whole pixels, so an eased step under half a pixel
-/// rounds to nothing. Within [`ANIAMTE_SNAP_THRESHOLD`] of the target that is
-/// arrival, but a slow `animation_speed` gets there first: at 10, on regular
-/// 120Hz frames, every slide stopped 6 pixels short and kept its marker.
+/// rounds to nothing. Stepping a pixel instead brings an animation all the way
+/// to its target, without a jump at the end, whatever its speed.
 fn at_least_a_pixel(current: IVec2, stepped: IVec2, target: IVec2) -> IVec2 {
     IVec2::select(
         stepped.cmpne(current),
@@ -809,18 +807,9 @@ pub(super) fn animate_entities(
     animate
         .into_iter()
         .for_each(|(mut position, entity, RepositionMarker(origin))| {
-            let target = origin.as_vec2();
-            let current = position.0.as_vec2();
-            let lerped = current.lerp(target, t);
-
-            // Snap once we're within a pixel of the target (or after one effectively-
-            // complete tick), so the marker is dropped promptly.
-            let finished = (target - lerped).length() <= ANIAMTE_SNAP_THRESHOLD;
-            let new_pos = if finished {
-                *origin
-            } else {
-                at_least_a_pixel(position.0, lerped.round().as_ivec2(), *origin)
-            };
+            let lerped = position.0.as_vec2().lerp(origin.as_vec2(), t);
+            let new_pos = at_least_a_pixel(position.0, lerped.round().as_ivec2(), *origin);
+            let finished = new_pos == *origin;
 
             trace!(
                 "entity {entity} source {} dest {origin} t {t:.3} moving to {new_pos}",
@@ -857,16 +846,9 @@ pub(super) fn animate_resize_entities(
     animate
         .into_iter()
         .for_each(|(mut bounds, entity, ResizeMarker(size))| {
-            let target = size.as_vec2();
-            let current = bounds.0.as_vec2();
-            let lerped = current.lerp(target, t);
-
-            let finished = (target - lerped).length() <= ANIAMTE_SNAP_THRESHOLD;
-            let new_size = if finished {
-                *size
-            } else {
-                at_least_a_pixel(bounds.0, lerped.round().as_ivec2(), *size)
-            };
+            let lerped = bounds.0.as_vec2().lerp(size.as_vec2(), t);
+            let new_size = at_least_a_pixel(bounds.0, lerped.round().as_ivec2(), *size);
+            let finished = new_size == *size;
 
             trace!(
                 "entity {entity} source {} dest {size} t {t:.3} resizing to {new_size}",

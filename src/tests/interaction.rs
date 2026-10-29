@@ -2846,6 +2846,55 @@ fn test_first_animation_steps_ignore_the_time_before_them() {
     );
 }
 
+/// An animation ends on single-pixel steps, not a jump: its steps only ever
+/// shrink. It used to snap to its target from 5 pixels away, the last step of
+/// every slide, after steps of a pixel.
+#[test]
+fn test_animation_ends_without_a_jump() {
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(15.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new().with_config(config).with_windows(3);
+    h.advance(Duration::from_secs(1));
+
+    let window = find_window_entity(1, h.app.world_mut());
+    let position = |app: &mut App| {
+        app.world_mut()
+            .get::<Position>(window)
+            .expect("window has a Position")
+            .0
+    };
+    let target = position(&mut h.app) + Origin::new(2000, 0);
+    h.app
+        .world_mut()
+        .entity_mut(window)
+        .insert(RepositionMarker(target));
+
+    // 120Hz frames until the slide lands.
+    h.app
+        .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_micros(8_333),
+        ));
+    let mut steps = vec![];
+    while h.app.world().get::<RepositionMarker>(window).is_some() && steps.len() < 300 {
+        let before = position(&mut h.app).x;
+        h.app.update();
+        steps.push(position(&mut h.app).x - before);
+    }
+
+    assert_eq!(position(&mut h.app), target);
+    assert!(
+        steps.windows(2).all(|pair| pair[1] <= pair[0]) && steps.last() == Some(&1),
+        "a slide's steps must shrink to a last one of a pixel, not {steps:?}"
+    );
+}
+
 /// A slow animation still arrives on frames as regular as the display's.
 /// Positions and sizes are whole pixels, so an eased step under half a pixel
 /// rounds to nothing: at `animation_speed = 10` on a 120Hz display, a slide
