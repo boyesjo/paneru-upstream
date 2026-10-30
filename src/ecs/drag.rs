@@ -15,7 +15,7 @@ use bevy::ecs::query::{Has, With, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::on_message;
-use bevy::ecs::system::{Commands, Query, Res, ResMut};
+use bevy::ecs::system::{Commands, Local, Query, Res, ResMut};
 use bevy::math::IRect;
 use bevy::time::Time;
 use std::time::Instant;
@@ -25,7 +25,7 @@ use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::workspace::spawn_space_move_guard;
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, LayoutPosition,
+    ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, LayoutPosition, MouseHeldMarker,
     NativeFullscreenMarker, Position, RepositionMarker, ResizeMarker, Scrolling,
     SelectedVirtualMarker, SpawnCommandsExt as _, UpdateSet, VerifyWindowPosition, WidthRatio,
 };
@@ -66,6 +66,8 @@ struct Press {
     pointer: Option<Origin>,
     /// The button came up, or the pointer moved without it.
     released: bool,
+    /// Escape called the drag off.
+    cancelled: bool,
     phase: Phase,
     /// The strip scrolling while the pointer is at a display's edge.
     edge: Option<EdgeScroll>,
@@ -122,6 +124,7 @@ impl WindowDrag {
             frame,
             pointer: None,
             released: false,
+            cancelled: false,
             phase: Phase::Pressed,
             edge: None,
         });
@@ -180,13 +183,15 @@ pub(super) fn register(app: &mut App) {
             report_landing
                 .in_set(UpdateSet::Housekeeping)
                 .run_if(reporting),
+            share_dragging.in_set(UpdateSet::Housekeeping),
         ),
     );
 }
 
 /// Follows the left button after a press: the pointer moving with it down, and
 /// its release. The pointer moving with no button down means the release was
-/// lost. The right button's release is no end of a drag.
+/// lost. The right button's release is no end of a drag. Escape calls a drag
+/// off.
 fn track_button(mut messages: MessageReader<InputEvent>, mut drag: ResMut<WindowDrag>) {
     for InputEvent(event) in messages.read() {
         let Some(press) = drag.press.as_mut() else {
@@ -199,6 +204,7 @@ fn track_button(mut messages: MessageReader<InputEvent>, mut drag: ResMut<Window
                 ..
             }
             | Event::MouseMoved { .. } => press.released = true,
+            Event::CancelDrag => press.cancelled = true,
             _ => {}
         }
     }
@@ -421,6 +427,7 @@ fn drag_window(
     mut layout_positions: Query<&mut LayoutPosition>,
     displays: Query<(Entity, &Display, Option<&DockPosition>)>,
     window_manager: Res<WindowManager>,
+    mouse_held: Query<(Entity, &MouseHeldMarker)>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
@@ -438,7 +445,7 @@ fn drag_window(
         .find_map(|(strip_entity, strip, ..)| strip.contains(entity).then_some(strip_entity));
 
     if matches!(press.phase, Phase::Pressed) {
-        if press.released {
+        if press.released || press.cancelled {
             drag.press = None;
             return;
         }
@@ -548,7 +555,8 @@ fn drag_window(
         }
     }
 
-    // Over no strip, the column goes back where it began.
+    // Over no strip, or called off, the column goes back where it began.
+    let target = target.filter(|_| !press.cancelled);
     let frame = window.frame();
     let dest = target
         .or_else(|| strips.contains(*home).then_some(*home))
@@ -615,7 +623,27 @@ fn drag_window(
         .and_then(|(.., child_of, _, _)| displays.get(child_of.parent()).ok())
         .map(|(_, display, _)| display.frame());
     let left_away = *away && !home_frame.is_some_and(|home| mostly_on(frame, home));
-    if press.released && left_away {
+    if press.cancelled {
+        // All back as it was before the press, but focus: the click gave it
+        // to the window, as a click on a title bar does, and only the move is
+        // called off. A column another display's strip gave back may be
+        // listed on that display's Space a moment longer, as after a drop
+        // there.
+        debug!("drag: window {} called off", window.id());
+        put_back(*home, scrolled_from, &strips, &mut commands);
+        let_land(held, &windows, &mut layout_positions, &mut frames);
+        if scrolled_from.len() > 1 {
+            spawn_space_move_guard(std::mem::take(column), &mut commands);
+        }
+        for (held, marker) in &mouse_held {
+            if marker.0 == entity
+                && let Ok(mut entity_commands) = commands.get_entity(held)
+            {
+                entity_commands.try_despawn();
+            }
+        }
+        drag.press = None;
+    } else if press.released && left_away {
         // Its column stays where it began, and the window where it was let
         // go: that display's Space takes it, and Paneru goes by the Space.
         debug!("drag: window {} let go on another display", window.id());
@@ -750,6 +778,15 @@ fn nearest_slot(widths: &[i32], strip_x: i32, x: i32) -> usize {
         }
     }
     nearest.0
+}
+
+/// Tells the input tap whether a window is being dragged, for Escape.
+fn share_dragging(drag: Res<WindowDrag>, mut shared: Local<bool>) {
+    let dragging = drag.dragging();
+    if *shared != dragging {
+        *shared = dragging;
+        crate::platform::input::set_dragging(dragging);
+    }
 }
 
 /// Where the dragged window will land, as subscribers are told: its slot in

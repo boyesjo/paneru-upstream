@@ -1151,3 +1151,96 @@ fn over_a_full_screen_space_its_own_strip_goes_back_where_it_was() {
     assert_eq!(strip_x_of(&mut h, TEST_WORKSPACE_ID), 0);
     release(&mut h, at);
 }
+
+/// The window with focus.
+fn focused(h: &mut TestHarness) -> WinID {
+    let world = h.world();
+    let mut windows = world.query_filtered::<&Window, With<crate::ecs::FocusedMarker>>();
+    windows.single(world).expect("a focused window").id()
+}
+
+/// Presses window 0 of [`three_gliding`] with window 1 focused, which macOS
+/// focuses as the click lands, and drags it past both others, its left edge
+/// at 700.
+fn past_both(h: &mut TestHarness) -> Origin {
+    h.mock_state.focus_window(1);
+    h.advance(SETTLE);
+    assert_eq!(focused(h), 1);
+    let start = title_bar(h, 0);
+    press(h, start);
+    h.mock_state.focus_window(0);
+    let at = drag(h, 0, start, &[100; 7]);
+    h.advance(SETTLE);
+    assert_eq!(order(h), [1, 2, 0]);
+    assert_eq!(focused(h), 0);
+    at
+}
+
+#[test]
+fn escape_puts_the_column_back_and_leaves_it_focused() {
+    let mut h = three_gliding();
+    let at = past_both(&mut h);
+    send(&mut h, Event::CancelDrag);
+    assert!(!held(&mut h));
+    // The window server stops the window; the pointer goes on without it.
+    send(
+        &mut h,
+        Event::MouseMoved {
+            point: point(at + IVec2::new(-300, 0)),
+            modifiers: Modifiers::empty(),
+        },
+    );
+    h.advance(SETTLE);
+    assert_eq!(order(&mut h), [0, 1, 2]);
+    assert_eq!(x(&mut h, 0), 0);
+    assert_eq!(x(&mut h, 2), 800);
+    assert_eq!(strip_x(&mut h), 0);
+    assert_eq!(focused(&mut h), 0);
+}
+
+#[test]
+fn escape_after_the_edge_scroll_scrolls_the_strip_back() {
+    let mut h = three_gliding();
+    let start = title_bar(&mut h, 2);
+    press(&mut h, start);
+    drag(&mut h, 2, start, &[10, 10]);
+    h.advance(SETTLE);
+    assert_eq!(strip_x(&mut h), -176);
+    send(&mut h, Event::CancelDrag);
+    h.advance(SETTLE);
+    assert_eq!(strip_x(&mut h), 0);
+    assert_eq!(order(&mut h), [0, 1, 2]);
+    assert_eq!(x(&mut h, 2), 800);
+}
+
+#[test]
+fn escape_on_another_display_brings_the_column_home() {
+    let mut h = one_beside_five();
+    let before = strip_x_of(&mut h, EXT_WORKSPACE_ID);
+    let frame = os_frame(&mut h, 0);
+    let start = title_bar(&mut h, 0);
+    press(&mut h, start);
+    drag(&mut h, 0, start, &[300; 9]);
+    h.advance(SETTLE);
+    assert!(order_of(&mut h, EXT_WORKSPACE_ID).contains(&0));
+    assert!(strip_x_of(&mut h, EXT_WORKSPACE_ID) < before);
+    send(&mut h, Event::CancelDrag);
+    h.advance(SETTLE);
+    assert_eq!(order_of(&mut h, TEST_WORKSPACE_ID), [0]);
+    assert_eq!(
+        order_of(&mut h, EXT_WORKSPACE_ID),
+        [100, 101, 102, 103, 104]
+    );
+    assert_eq!(strip_x_of(&mut h, EXT_WORKSPACE_ID), before);
+    assert_eq!(os_frame(&mut h, 0), frame);
+}
+
+#[test]
+fn escape_during_a_press_lets_it_go() {
+    let mut h = three();
+    let start = title_bar(&mut h, 1);
+    press(&mut h, start);
+    send(&mut h, Event::CancelDrag);
+    assert!(!held(&mut h));
+    assert_eq!(order(&mut h), [0, 1, 2]);
+}

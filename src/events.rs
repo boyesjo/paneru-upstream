@@ -146,6 +146,9 @@ pub enum Event {
         point: CGPoint,
         modifiers: Modifiers,
     },
+    /// Escape was pressed during a window drag: the drag is called off, and
+    /// the pointer moves without it till the button comes up.
+    CancelDrag,
 
     /// A swipe gesture has been detected.
     Swipe {
@@ -266,6 +269,7 @@ impl Event {
                 | Event::MouseUp { .. }
                 | Event::MouseDragged { .. }
                 | Event::MouseMoved { .. }
+                | Event::CancelDrag
                 | Event::Swipe { .. }
                 | Event::VerticalSwipe { .. }
                 | Event::VerticalScrollTick { .. }
