@@ -225,6 +225,16 @@ Emitted when display configuration changes. `display_id` can be `null` when the
 event is a global display-change notification and Paneru cannot resolve an
 active display id.
 
+```json
+{"event":"window_dragged","window_id":321,"landing":{"x":400,"y":20,"width":400,"height":748}}
+{"event":"window_dragged","window_id":321,"landing":null}
+```
+
+Emitted while a tiled window is dragged by its title bar, each time the frame
+it will land in changes, and once more with `landing` `null` when the drag
+ends. `landing` is the window's slot in its strip, in the same coordinates as
+the frames of `query state`, with the other columns already moved aside.
+
 ## Virtual Workspace Commands
 
 Absolute virtual workspace selection is addressed as a window command:

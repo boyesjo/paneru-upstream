@@ -5,6 +5,7 @@ use bevy::ecs::query::Added;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::system::{Query, Res, ResMut};
+use bevy::math::IRect;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,8 +13,9 @@ use tracing::warn;
 
 use super::{Command, Operation};
 
+use crate::ecs::drag::WindowDrag;
 use crate::ecs::state::{
-    PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState, PaneruWindowState,
+    Frame, PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState, PaneruWindowState,
     QueryStateParams, StateEvent,
 };
 use crate::ecs::{ActiveWorkspaceMarker, FocusedMarker, Unmanaged};
@@ -44,6 +46,8 @@ struct StateBroadcastCache {
     virtual_workspaces: Option<Vec<PaneruVirtualWorkspaceState>>,
     on_screen: Option<Vec<PaneruWindowState>>,
     titles: BTreeMap<WinID, String>,
+    /// The drag last reported, so each change of where it lands is sent once.
+    dragging: Option<(WinID, IRect)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -370,18 +374,39 @@ fn collect_state_broadcast_events_for_intent(
     outgoing
 }
 
+#[allow(clippy::too_many_arguments)]
 fn state_event_broadcast_handler(
     mut messages: MessageReader<Event>,
     mut subscribers: ResMut<StateSubscribers>,
     mut cache: ResMut<StateBroadcastCache>,
     focused_changes: Query<Entity, Added<FocusedMarker>>,
     active_workspace_changes: Query<Entity, Added<ActiveWorkspaceMarker>>,
+    drag: Res<WindowDrag>,
     state: QueryStateParams,
 ) {
     let events = messages.read().collect::<Vec<_>>();
 
     if subscribers.streams.is_empty() {
         return;
+    }
+
+    // A drag is reported as it goes, not held back with the geometry its
+    // motion moves.
+    let landing = drag.landing();
+    let previous = std::mem::replace(&mut cache.dragging, landing);
+    if previous != landing
+        && let Some((window_id, _)) = landing.or(previous)
+    {
+        let landing = landing.map(|(_, frame)| Frame {
+            x: frame.min.x,
+            y: frame.min.y,
+            width: frame.width(),
+            height: frame.height(),
+        });
+        send(
+            &mut subscribers,
+            &[StateEvent::WindowDragged { window_id, landing }],
+        );
     }
 
     let signals = StateBroadcastSignals {
@@ -430,6 +455,11 @@ fn state_event_broadcast_handler(
         return;
     }
 
+    send(&mut subscribers, &outgoing);
+}
+
+/// Pushes `events` to every live subscriber.
+fn send(subscribers: &mut StateSubscribers, events: &[StateEvent]) {
     // Each send is non-blocking and bounded, so a stalled reader just drops the
     // event instead of blocking the main thread; an exited subscriber is
     // marked below and reaped here on the next broadcast.
@@ -437,9 +467,8 @@ fn state_event_broadcast_handler(
         .streams
         .retain(|subscriber| subscriber.alive.load(Ordering::Relaxed));
 
-    let events = Arc::new(outgoing);
     for subscriber in &subscribers.streams {
-        for event in events.iter() {
+        for event in events {
             match subscriber.channel.try_send(event) {
                 Ok(()) => {}
                 // The subscriber's process is gone; reaped on the next
@@ -718,6 +747,7 @@ mod tests {
                 PaneruEvent::MouseUp {
                     point: objc2_core_foundation::CGPoint::default(),
                     modifiers: crate::platform::Modifiers::empty(),
+                    button: crate::events::MouseButton::Left,
                 },
             ]
             .iter(),

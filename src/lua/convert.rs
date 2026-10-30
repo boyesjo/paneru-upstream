@@ -175,8 +175,12 @@ impl TryFrom<&Event> for LuaEvent {
                 window_id: *window_id,
             },
 
-            Event::MouseDown { point, modifiers } => LuaEvent::MouseDown(mouse(point, *modifiers)),
-            Event::MouseUp { point, modifiers } => LuaEvent::MouseUp(mouse(point, *modifiers)),
+            Event::MouseDown {
+                point, modifiers, ..
+            } => LuaEvent::MouseDown(mouse(point, *modifiers)),
+            Event::MouseUp {
+                point, modifiers, ..
+            } => LuaEvent::MouseUp(mouse(point, *modifiers)),
             Event::MouseDragged { point, modifiers } => {
                 LuaEvent::MouseDragged(mouse(point, *modifiers))
             }
@@ -550,6 +554,7 @@ mod tests {
             &Event::MouseDown {
                 point: objc2_core_foundation::CGPoint { x: 10.0, y: 20.0 },
                 modifiers: Modifiers::ALT,
+                button: crate::events::MouseButton::Left,
             },
         )
         .expect("mouse_down should marshal");

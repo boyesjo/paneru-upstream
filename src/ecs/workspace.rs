@@ -21,6 +21,7 @@ use crate::commands::{
     Direction, MoveFocus, Operation, filter_window_operations, get_window_in_direction,
 };
 use crate::config::Config;
+use crate::ecs::drag::WindowDrag;
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER, origin_exposing};
 use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
@@ -230,6 +231,27 @@ pub(crate) struct SnapStripMarker {
 /// shortly after a switch still animates normally.
 const SNAP_STRIP_GUARD_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Windows of a column dragged into a strip on another display. macOS keeps
+/// listing them on their old space until they reach the new display, and
+/// `detect_moved_windows` would take them back for whichever workspace shows
+/// there next. While a live guard names them, it leaves them be. Expires via
+/// `timeout_ticker`.
+#[derive(Component, Debug)]
+pub(crate) struct SpaceMoveGuard {
+    windows: Vec<Entity>,
+}
+
+/// Long enough for the moved windows to reach their new display, animation
+/// and all.
+const SPACE_MOVE_GUARD_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Guards `windows` against being taken back while they reach another
+/// display, for [`SPACE_MOVE_GUARD_TIMEOUT`].
+pub(crate) fn spawn_space_move_guard(windows: Vec<Entity>, commands: &mut Commands) {
+    let timeout = Timeout::new(SPACE_MOVE_GUARD_TIMEOUT, None, commands);
+    commands.spawn((timeout, SpaceMoveGuard { windows }));
+}
+
 fn spawn_snap_strip_guard(strip: Entity, commands: &mut Commands) {
     let timeout = Timeout::new(SNAP_STRIP_GUARD_TIMEOUT, None, commands);
     commands.spawn((timeout, SnapStripMarker { strip }));
@@ -354,6 +376,7 @@ fn workspace_change_handler(
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn detect_moved_windows(
     activated_workspace: Single<Entity, Added<ActiveWorkspaceMarker>>,
@@ -366,6 +389,7 @@ fn detect_moved_windows(
     apps: Query<&mut Application>,
     window_manager: Res<WindowManager>,
     reconcile_state: Option<Res<crate::ecs::display::DisplayReconcileState>>,
+    carried: (Res<WindowDrag>, Query<&SpaceMoveGuard>),
     mut ignored_windows: Local<HashSet<WinID>>,
     mut ctx: WindowCtx,
 ) {
@@ -439,9 +463,15 @@ fn detect_moved_windows(
         .iter()
         .copied()
         .filter(|&entity| {
-            !workspaces
-                .iter()
-                .any(|(strip, _, fullscreen, _)| fullscreen && strip.contains(entity))
+            // A window a drag carries to another display's strip is placed
+            // by the drag.
+            let (drag, guards) = &carried;
+            let carried =
+                drag.carries(entity) || guards.iter().any(|g| g.windows.contains(&entity));
+            !carried
+                && !workspaces
+                    .iter()
+                    .any(|(strip, _, fullscreen, _)| fullscreen && strip.contains(entity))
         })
         .collect();
     if moved_set.is_empty() {

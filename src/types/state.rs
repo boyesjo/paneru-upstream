@@ -248,6 +248,13 @@ pub enum StateEvent {
     /// Display configuration changed. `display_id` is `null` for a global
     /// change Paneru cannot pin to one display.
     DisplayChanged { display_id: Option<u32> },
+    /// A window is being dragged by its title bar, and will land in
+    /// `landing` if let go now; sent as that changes, and with `landing`
+    /// `null` once the drag ends.
+    WindowDragged {
+        window_id: i32,
+        landing: Option<Frame>,
+    },
 }
 
 impl StateEvent {
@@ -319,6 +326,37 @@ mod tests {
             event,
             "clients must decode exactly what the daemon emits"
         );
+    }
+
+    #[test]
+    fn a_drag_says_where_the_window_lands_and_when_it_ends() {
+        let landing = StateEvent::WindowDragged {
+            window_id: 7,
+            landing: Some(Frame {
+                x: 400,
+                y: 20,
+                width: 400,
+                height: 748,
+            }),
+        };
+        let json = landing.to_json().unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "event": "window_dragged",
+                "window_id": 7,
+                "landing": {"x": 400, "y": 20, "width": 400, "height": 748},
+            })
+        );
+        let ended = StateEvent::WindowDragged {
+            window_id: 7,
+            landing: None,
+        };
+        assert_eq!(ended.to_json().unwrap()["landing"], serde_json::Value::Null);
+        for event in [landing, ended] {
+            let bytes = MessagePack.encode(&event).unwrap();
+            assert_eq!(MessagePack.decode::<StateEvent>(&bytes).unwrap(), event);
+        }
     }
 
     /// A daemon from before `role`/`subrole` existed omits them; a newer client

@@ -28,6 +28,13 @@ pub enum DestroySource {
     SpaceNotification,
 }
 
+/// The mouse button a press or release is of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Right,
+}
+
 /// Where a client's answer goes.
 ///
 /// Bounded to one: exactly one answer is ever sent, and the ECS side answers
@@ -121,11 +128,13 @@ pub enum Event {
     MouseDown {
         point: CGPoint,
         modifiers: Modifiers,
+        button: MouseButton,
     },
     /// A mouse up event has occurred.
     MouseUp {
         point: CGPoint,
         modifiers: Modifiers,
+        button: MouseButton,
     },
     /// A mouse drag event has occurred.
     MouseDragged {

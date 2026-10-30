@@ -13,6 +13,7 @@ use stdext::function_name;
 use tracing::{Level, instrument, trace};
 
 use crate::config::Config;
+use crate::ecs::drag::WindowDrag;
 use crate::ecs::params::Windows;
 use crate::ecs::workspace::{PreviousStripPosition, SnapStripMarker};
 use crate::ecs::{
@@ -661,6 +662,30 @@ impl LayoutStrip {
                 }
             }
         }
+    }
+
+    /// Takes the whole column holding `entity` out of the strip, a stack with
+    /// all its windows, and whether it was shown as tabs.
+    pub(crate) fn take_column(&mut self, entity: Entity) -> Option<(Column, bool)> {
+        let index = self.index_of(entity).ok()?;
+        let column = self.columns.remove(index)?;
+        let tabbed = column
+            .window_iter()
+            .any(|e| self.tabbed_stacks.contains(&e));
+        for e in column.window_iter() {
+            self.tabbed_stacks.remove(&e);
+        }
+        Some((column, tabbed))
+    }
+
+    /// Puts a column taken from a strip at `index` (clamped to the column
+    /// count), shown as tabs if it was.
+    pub(crate) fn insert_column(&mut self, index: usize, column: Column, tabbed: bool) {
+        if tabbed {
+            self.tabbed_stacks.extend(column.window_iter());
+        }
+        let index = index.min(self.len());
+        self.columns.insert(index, column);
     }
 
     /// Retrieves the `Panel` at a specified index in the pane.
@@ -1709,6 +1734,7 @@ fn position_layout_windows(
     workspaces: StripsForWindowPositioning,
     snap_guards: Query<&SnapStripMarker>,
     displays: DisplayViewports,
+    drag: Res<WindowDrag>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
@@ -1731,6 +1757,10 @@ fn position_layout_windows(
     }
 
     for (entity, window, layout_position, mut position, mut bounds, resize) in positioned_windows {
+        // The pointer has it: it goes to its slot when let go.
+        if drag.holds(entity) {
+            continue;
+        }
         let Some(context) = strip_contexts.get(&entity) else {
             continue;
         };

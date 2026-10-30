@@ -3,13 +3,14 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::With;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
-use bevy::ecs::system::{Commands, Local, Query, Res, Single};
+use bevy::ecs::system::{Commands, Local, Query, Res, ResMut, Single};
 use bevy::time::Time;
 use std::time::{Duration, Instant};
 use tracing::{debug, trace, warn};
 
 use super::{MouseHeldMarker, Timeout};
 use crate::config::Config;
+use crate::ecs::drag::{self, WindowDrag};
 use crate::ecs::focus::PendingFocusLayout;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{GlobalState, Windows};
@@ -19,7 +20,7 @@ use crate::ecs::{
 };
 use bevy::ecs::schedule::common_conditions::on_message;
 
-use crate::events::{Event, InputEvent};
+use crate::events::{Event, InputEvent, MouseButton};
 use crate::manager::{Display, Origin, WindowManager, origin_from};
 use crate::platform::WinID;
 use crate::util::round_px;
@@ -56,6 +57,7 @@ impl Plugin for MouseEventsPlugin {
                 .in_set(UpdateSet::Input)
                 .run_if(on_message::<InputEvent>),
         );
+        drag::register(app);
     }
 }
 
@@ -225,26 +227,39 @@ fn mouse_moved_trigger(
 /// * `active_display` - A query for the active display.
 /// * `main_cid` - The main connection ID resource.
 /// * `commands` - Bevy commands to trigger a reshuffle.
-fn mouse_down_trigger(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn mouse_down_trigger(
     mut messages: MessageReader<InputEvent>,
     windows: Windows,
     active_workspace: Query<(Entity, Option<&Scrolling>), With<ActiveWorkspaceMarker>>,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
     mouse_held: Query<Entity, With<MouseHeldMarker>>,
+    strips: Query<&LayoutStrip>,
+    mut drag: ResMut<WindowDrag>,
     mut commands: Commands,
 ) {
     for InputEvent(event) in messages.read() {
-        let Event::MouseDown { point, .. } = event else {
+        let Event::MouseDown { point, button, .. } = event else {
             continue;
         };
         trace!("{point:?}");
+        if drag.dragging() {
+            // The drag has the strip until its button comes up.
+            continue;
+        }
 
-        let Some((_, entity)) = window_manager
+        let found = window_manager
             .find_window_at_point(point)
             .ok()
-            .and_then(|window_id| windows.find(window_id))
-        else {
+            .and_then(|window_id| windows.find(window_id));
+        if *button == MouseButton::Left {
+            // Only a window in a strip has a slot to be dragged to.
+            let tiled =
+                found.filter(|(_, entity)| strips.iter().any(|strip| strip.contains(*entity)));
+            drag.press(tiled.map(|(window, entity)| (entity, window.frame())));
+        }
+        let Some((_, entity)) = found else {
             continue;
         };
 
@@ -276,19 +291,26 @@ fn mouse_down_trigger(
 }
 
 /// Handles mouse-up events. Triggers the deferred reshuffle so the clicked
-/// window slides into view after the user releases the button.
+/// window slides into view after the user releases the button. A drag's
+/// release reshuffles by itself, and another button's does nothing to it.
 fn mouse_up_trigger(
     mut messages: MessageReader<InputEvent>,
     mouse_held: Query<(Entity, &MouseHeldMarker)>,
+    drag: Res<WindowDrag>,
     mut commands: Commands,
 ) {
     for InputEvent(event) in messages.read() {
-        if !matches!(event, Event::MouseUp { .. }) {
+        let Event::MouseUp { button, .. } = event else {
+            continue;
+        };
+        if drag.dragging() && *button != MouseButton::Left {
             continue;
         }
 
         for (held_entity, marker) in &mouse_held {
-            commands.reshuffle_around(marker.0);
+            if !drag.dragging() {
+                commands.reshuffle_around(marker.0);
+            }
             if let Ok(mut entity_commands) = commands.get_entity(held_entity) {
                 entity_commands.try_despawn();
             }

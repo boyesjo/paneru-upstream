@@ -26,7 +26,7 @@ use crate::commands::{Command, Direction, Operation};
 use crate::config::Config;
 use crate::config::swipe::focus_direction;
 use crate::errors::{Error, Result};
-use crate::events::{Event, EventSender};
+use crate::events::{Event, EventSender, MouseButton};
 use crate::platform::Modifiers;
 
 const NX_DEVICEFNKEYMASK: u64 = 0x0080_0100;
@@ -418,11 +418,21 @@ impl InputHandler {
         let result = match event_type {
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
                 let point = CGEvent::location(Some(event));
-                events.send(Event::MouseDown { point, modifiers })
+                let button = mouse_button(event_type);
+                events.send(Event::MouseDown {
+                    point,
+                    modifiers,
+                    button,
+                })
             }
             CGEventType::LeftMouseUp | CGEventType::RightMouseUp => {
                 let point = CGEvent::location(Some(event));
-                events.send(Event::MouseUp { point, modifiers })
+                let button = mouse_button(event_type);
+                events.send(Event::MouseUp {
+                    point,
+                    modifiers,
+                    button,
+                })
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
                 let point = CGEvent::location(Some(event));
@@ -722,6 +732,18 @@ fn get_scroll_modifiers(eventflags: CGEventFlags) -> Modifiers {
                 modifiers
             }
         })
+}
+
+/// The button of a press or release: the right one's, or else the left.
+fn mouse_button(event_type: CGEventType) -> MouseButton {
+    if matches!(
+        event_type,
+        CGEventType::RightMouseDown | CGEventType::RightMouseUp
+    ) {
+        MouseButton::Right
+    } else {
+        MouseButton::Left
+    }
 }
 
 fn get_modifiers(eventflags: CGEventFlags) -> Modifiers {

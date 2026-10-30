@@ -41,6 +41,7 @@ use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 
 pub mod display;
+pub(crate) mod drag;
 pub mod focus;
 pub mod layout;
 #[cfg(feature = "lua")]

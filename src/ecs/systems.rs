@@ -25,6 +25,7 @@ use super::{
 
 use crate::config::{Config, decorations::BorderRadiusOption};
 use crate::ecs::display::FloatingLayer;
+use crate::ecs::drag::WindowDrag;
 use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::{ActiveDisplay, FrameActivity, Windows};
 use crate::ecs::{
@@ -1306,12 +1307,13 @@ pub(super) fn verify_window_position(
 /// share of the display its strip is on: a strip on the display without
 /// focus is sized for its own, and a share of the other would grow or shrink
 /// the window wherever it went next. A window in no strip is of the active
-/// display.
+/// display. A window dragged by its title bar keeps its size until it's let go.
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn commit_window_size(
     active_display: ActiveDisplay,
     strips: Query<(&LayoutStrip, &ChildOf)>,
     displays: Query<&Display>,
+    drag: Res<WindowDrag>,
     mut resized_windows: Populated<
         (Entity, &mut Window, &Bounds, &mut WidthRatio),
         Changed<Bounds>,
@@ -1332,6 +1334,9 @@ pub(super) fn commit_window_size(
     resized_windows
         .par_iter_mut()
         .for_each(|(entity, mut window, size, mut width_ratio)| {
+            if drag.holds(entity) {
+                return;
+            }
             let width = widths.get(&entity).copied().unwrap_or(fallback);
             width_ratio.0 = f64::from(size.0.x) / f64::from(width);
             objc2::rc::autoreleasepool(|_| window.resize(size.0));
